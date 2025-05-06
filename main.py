@@ -5,17 +5,13 @@ import os
 import numpy as np
 from typing import Optional, Dict, List, Any
 
-# Import the actual class definition from your model file
-from model import EnhancedToxicityDetector  # Assuming your model code is in model.py
-
-# Initialize FastAPI app
 app = FastAPI(
     title="Toxicity Detection API",
     description="API for detecting toxic content in text using a pre-trained ML model",
     version="1.0.0"
 )
 
-# Define request and response models
+# Request/Response Models (same as before)
 class TextRequest(BaseModel):
     text: str
     threshold: Optional[float] = 0.5
@@ -36,21 +32,28 @@ class BatchTextResponse(BaseModel):
     results: List[TextResponse]
     summary: Dict[str, Any]
 
-# Global variable to store the loaded model
+# Global model variable
 toxicity_model = None
 
 def load_model(model_path='toxicity_detector.pkl'):
-    """Load the pickled model with proper class definition available"""
+    """Load the pickled model without requiring original class"""
     try:
         print(f"Current directory: {os.getcwd()}")
         print(f"Looking for model at: {model_path}")
         
-        # Ensure the model file exists
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found at {model_path}")
         
+        # Load with protocol version that matches how it was saved
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
+        
+        # Verify the loaded object has the methods we need
+        required_methods = ['predict_proba', 'predict', 'detect_toxic_phrases', 'count_toxic_phrases']
+        for method in required_methods:
+            if not hasattr(model, method):
+                raise AttributeError(f"Loaded model missing required method: {method}")
+        
         print("Model loaded successfully")
         return model
     except Exception as e:
@@ -65,13 +68,12 @@ async def startup_event():
         toxicity_model = load_model()
     except Exception as e:
         print(f"Failed to load model: {str(e)}")
-        # You might want to exit here if model loading is critical
+        # In production, you might want to exit if model loading fails
         raise
 
-# API endpoints
+# API endpoints (same as before)
 @app.get("/")
 async def read_root():
-    """Root endpoint"""
     return {
         "message": "Toxicity Detection API is running",
         "version": "1.0.0",
@@ -84,14 +86,12 @@ async def read_root():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
     if toxicity_model is None:
         return {"status": "unhealthy", "message": "Model not loaded"}
     return {"status": "healthy", "message": "API is running and model is loaded"}
 
 @app.post("/api/detect", response_model=TextResponse)
 async def detect_toxicity(request: TextRequest):
-    """Detect toxicity in a single text"""
     if toxicity_model is None:
         raise HTTPException(status_code=500, detail="Model not loaded")
     
@@ -106,6 +106,7 @@ async def detect_toxicity(request: TextRequest):
         }
         
         if request.return_details:
+            # These methods will work if they exist in the loaded model
             toxic_phrases = toxicity_model.detect_toxic_phrases(request.text)
             category_counts = toxicity_model.count_toxic_phrases(request.text)
             
@@ -121,7 +122,6 @@ async def detect_toxicity(request: TextRequest):
 
 @app.post("/api/batch-detect", response_model=BatchTextResponse)
 async def batch_detect_toxicity(request: BatchTextRequest):
-    """Detect toxicity in multiple texts"""
     if toxicity_model is None:
         raise HTTPException(status_code=500, detail="Model not loaded")
     
