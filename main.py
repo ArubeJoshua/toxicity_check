@@ -1,29 +1,31 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import pickle
+import sys
+import os
 import re
-import nltk
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
-from nltk.tokenize import word_tokenize
 import numpy as np
 from typing import Optional, Dict, List, Any, Union
 
-# Download NLTK resources if not already downloaded
-try:
-    nltk.data.find('corpora/stopwords')
-except LookupError:
-    nltk.download('stopwords', quiet=True)
-
-try:
-    nltk.data.find('corpora/wordnet')
-except LookupError:
-    nltk.download('wordnet', quiet=True)
-
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('punkt', quiet=True)
+# Define the ToxicityDetector class here to ensure it exists when unpickling
+class EnhancedToxicityDetector:
+    def __init__(self, model_type='logistic_regression'):
+        self.model_type = model_type
+        self.base_model = None
+        self.toxic_phrases = {}
+        self.all_toxic_phrases = []
+    
+    def predict_proba(self, X):
+        pass
+    
+    def predict(self, X, threshold=0.5):
+        pass
+    
+    def detect_toxic_phrases(self, text):
+        pass
+    
+    def count_toxic_phrases(self, text):
+        pass
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -53,98 +55,30 @@ class BatchTextResponse(BaseModel):
     results: List[TextResponse]
     summary: Dict[str, Any]
 
-# Twitter text preprocessor class
-class TwitterTextPreprocessor:
-    """Text preprocessing class specifically for Twitter data"""
-    def __init__(self, remove_stopwords=True, lemmatize=True):
-        self.remove_stopwords = remove_stopwords
-        self.lemmatize = lemmatize
-        self.stop_words = set(stopwords.words('english'))
-        self.lemmatizer = WordNetLemmatizer()
-    
-    def clean_text(self, text):
-        """Twitter-specific text cleaning"""
-        if not isinstance(text, str):
-            return ""
-        
-        # Convert to lowercase
-        text = text.lower()
-        
-        # Remove URLs
-        text = re.sub(r'https?://\S+|www\.\S+', '', text)
-        
-        # Remove Twitter-specific elements
-        text = re.sub(r'@user', '', text)  # Replace @user as seen in the sample
-        text = re.sub(r'@[A-Za-z0-9_]+', '', text)  # Remove other @mentions
-        text = re.sub(r'#[A-Za-z0-9_]+', '', text)  # Remove hashtags
-        
-        # Remove emojis and special characters (common in tweets)
-        text = re.sub(r'[^\x00-\x7F]+', '', text)
-        
-        # Keep alphanumeric and basic punctuation
-        text = re.sub(r'[^a-zA-Z0-9\s.,!?]', '', text)
-        
-        # Remove extra whitespace
-        text = re.sub(r'\s+', ' ', text).strip()
-        
-        return text
-    
-    def process(self, text):
-        """Full text preprocessing pipeline"""
-        text = self.clean_text(text)
-        
-        # Tokenize
-        tokens = word_tokenize(text)
-        
-        # Remove stopwords if needed
-        if self.remove_stopwords:
-            tokens = [t for t in tokens if t not in self.stop_words]
-        
-        # Lemmatize if needed
-        if self.lemmatize:
-            tokens = [self.lemmatizer.lemmatize(t) for t in tokens]
-        
-        # Join back to string
-        return " ".join(tokens)
-
 # Global variable to store the loaded model
 toxicity_model = None
 
-# Add exception handling for missing model file
-def safe_load_model(model_path='twitter_toxicity_detector.pkl'):
-    """Safely load the model, with fallback for deployment"""
+# Load the model directly
+def load_model(model_path='toxicity_detector.pkl'):
+    """Load the pickled model"""
     try:
+        # Print current directory for debugging
+        print(f"Current directory: {os.getcwd()}")
+        print(f"Looking for model at: {model_path}")
+        
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
+        print("Model loaded successfully")
         return model
     except Exception as e:
-        print(f"Warning: Could not load model: {str(e)}")
-        print("Creating a simple fallback model for demonstration")
-        
-        # Create a very simple fallback model for demonstration
-        class SimpleModel:
-            def predict_proba(self, texts):
-                # Always return a safe probability of 0.1 (non-toxic)
-                return np.array([[0.9, 0.1]] * len(texts))
-            
-            def detect_toxic_phrases(self, text):
-                # Return empty list since this is just a fallback
-                return []
-            
-            def count_toxic_phrases(self, text):
-                # Return empty dict since this is just a fallback
-                return {}
-        
-        return SimpleModel()
+        print(f"Error loading model: {str(e)}")
+        raise e
 
 @app.on_event("startup")
 async def startup_event():
     """Load model on startup"""
     global toxicity_model
-    try:
-        toxicity_model = safe_load_model()
-    except Exception as e:
-        print(f"Error loading model: {str(e)}")
+    toxicity_model = load_model()
 
 # API endpoints
 @app.get("/")
@@ -173,10 +107,7 @@ async def detect_toxicity(request: TextRequest):
     global toxicity_model
     
     if toxicity_model is None:
-        try:
-            toxicity_model = safe_load_model()
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Model not loaded: {str(e)}")
+        raise HTTPException(status_code=500, detail="Model not loaded")
     
     text = request.text
     threshold = request.threshold
@@ -211,10 +142,7 @@ async def batch_detect_toxicity(request: BatchTextRequest):
     global toxicity_model
     
     if toxicity_model is None:
-        try:
-            toxicity_model = safe_load_model()
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Model not loaded: {str(e)}")
+        raise HTTPException(status_code=500, detail="Model not loaded")
     
     texts = request.texts
     threshold = request.threshold
