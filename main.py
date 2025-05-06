@@ -35,7 +35,7 @@ class BatchTextResponse(BaseModel):
 # Global model variable
 toxicity_model = None
 
-def load_model(model_path='toxicity_detector.pkl'):
+def load_model(model_path='toxicity_model.pkl'):
     """Load the pickled model without requiring original class"""
     try:
         print(f"Current directory: {os.getcwd()}")
