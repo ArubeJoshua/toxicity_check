@@ -1,31 +1,12 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import pickle
-import sys
 import os
-import re
 import numpy as np
-from typing import Optional, Dict, List, Any, Union
+from typing import Optional, Dict, List, Any
 
-# Define the ToxicityDetector class here to ensure it exists when unpickling
-class EnhancedToxicityDetector:
-    def __init__(self, model_type='logistic_regression'):
-        self.model_type = model_type
-        self.base_model = None
-        self.toxic_phrases = {}
-        self.all_toxic_phrases = []
-    
-    def predict_proba(self, X):
-        pass
-    
-    def predict(self, X, threshold=0.5):
-        pass
-    
-    def detect_toxic_phrases(self, text):
-        pass
-    
-    def count_toxic_phrases(self, text):
-        pass
+# Import the actual class definition from your model file
+from model import EnhancedToxicityDetector  # Assuming your model code is in model.py
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -58,13 +39,15 @@ class BatchTextResponse(BaseModel):
 # Global variable to store the loaded model
 toxicity_model = None
 
-# Load the model directly
 def load_model(model_path='toxicity_detector.pkl'):
-    """Load the pickled model"""
+    """Load the pickled model with proper class definition available"""
     try:
-        # Print current directory for debugging
         print(f"Current directory: {os.getcwd()}")
         print(f"Looking for model at: {model_path}")
+        
+        # Ensure the model file exists
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found at {model_path}")
         
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
@@ -78,7 +61,12 @@ def load_model(model_path='toxicity_detector.pkl'):
 async def startup_event():
     """Load model on startup"""
     global toxicity_model
-    toxicity_model = load_model()
+    try:
+        toxicity_model = load_model()
+    except Exception as e:
+        print(f"Failed to load model: {str(e)}")
+        # You might want to exit here if model loading is critical
+        raise
 
 # API endpoints
 @app.get("/")
@@ -104,60 +92,49 @@ async def health_check():
 @app.post("/api/detect", response_model=TextResponse)
 async def detect_toxicity(request: TextRequest):
     """Detect toxicity in a single text"""
-    global toxicity_model
-    
     if toxicity_model is None:
         raise HTTPException(status_code=500, detail="Model not loaded")
     
-    text = request.text
-    threshold = request.threshold
-    
     try:
-        proba = toxicity_model.predict_proba([text])[0][1]
-        is_toxic = proba > threshold
+        proba = toxicity_model.predict_proba([request.text])[0][1]
+        is_toxic = proba > request.threshold
         
         response = {
-            "text": text,
+            "text": request.text,
             "is_toxic": bool(is_toxic),
             "toxic_score": float(proba),
         }
         
         if request.return_details:
-            toxic_phrases = toxicity_model.detect_toxic_phrases(text)
-            category_counts = toxicity_model.count_toxic_phrases(text)
+            toxic_phrases = toxicity_model.detect_toxic_phrases(request.text)
+            category_counts = toxicity_model.count_toxic_phrases(request.text)
             
             response["details"] = {
-                "toxic_phrases": [{"phrase": phrase, "category": category} for phrase, category in toxic_phrases],
+                "toxic_phrases": [{"phrase": phrase, "category": category} 
+                                for phrase, category in toxic_phrases],
                 "category_counts": category_counts
             }
         
         return response
-    
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
 
 @app.post("/api/batch-detect", response_model=BatchTextResponse)
 async def batch_detect_toxicity(request: BatchTextRequest):
     """Detect toxicity in multiple texts"""
-    global toxicity_model
-    
     if toxicity_model is None:
         raise HTTPException(status_code=500, detail="Model not loaded")
     
-    texts = request.texts
-    threshold = request.threshold
-    
     try:
-        probas = toxicity_model.predict_proba(texts)[:, 1]
-        is_toxic = probas > threshold
+        probas = toxicity_model.predict_proba(request.texts)[:, 1]
+        is_toxic = probas > request.threshold
         
         results = []
-        
-        for i, text in enumerate(texts):
+        for text, prob, toxic in zip(request.texts, probas, is_toxic):
             result = {
                 "text": text,
-                "is_toxic": bool(is_toxic[i]),
-                "toxic_score": float(probas[i]),
+                "is_toxic": bool(toxic),
+                "toxic_score": float(prob),
             }
             
             if request.return_details:
@@ -165,21 +142,20 @@ async def batch_detect_toxicity(request: BatchTextRequest):
                 category_counts = toxicity_model.count_toxic_phrases(text)
                 
                 result["details"] = {
-                    "toxic_phrases": [{"phrase": phrase, "category": category} for phrase, category in toxic_phrases],
+                    "toxic_phrases": [{"phrase": phrase, "category": category} 
+                                    for phrase, category in toxic_phrases],
                     "category_counts": category_counts
                 }
             
             results.append(result)
         
-        # Create summary
         summary = {
-            "total_texts": len(texts),
+            "total_texts": len(request.texts),
             "toxic_texts": int(sum(is_toxic)),
             "non_toxic_texts": int(sum(~is_toxic)),
             "average_toxic_score": float(np.mean(probas)),
         }
         
         return {"results": results, "summary": summary}
-    
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
