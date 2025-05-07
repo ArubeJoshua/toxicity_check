@@ -6,7 +6,7 @@ from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from nltk.tokenize import word_tokenize
 import numpy as np
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 import uvicorn
 
@@ -106,11 +106,8 @@ def read_root():
     return {"message": "Toxicity Detection API is running"}
 
 @app.post("/predict")
-async def predict(request: Request):
+async def predict(text: str):
     try:
-        data = await request.json()
-        text = data.get("text", "")
-        
         if not text:
             return JSONResponse(
                 status_code=400,
