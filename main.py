@@ -1,161 +1,131 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import pickle
 import os
+import pickle
+import re
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from nltk.tokenize import word_tokenize
 import numpy as np
-from typing import Optional, Dict, List, Any
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import uvicorn
 
-app = FastAPI(
-    title="Toxicity Detection API",
-    description="API for detecting toxic content in text using a pre-trained ML model",
-    version="1.0.0"
-)
+# Initialize FastAPI app
+app = FastAPI(title="Toxicity Detection API")
 
-# Request/Response Models (same as before)
-class TextRequest(BaseModel):
-    text: str
-    threshold: Optional[float] = 0.5
-    return_details: Optional[bool] = False
+# Download NLTK resources on startup
+@app.on_event("startup")
+def download_nltk_resources():
+    nltk.download('stopwords', quiet=True)
+    nltk.download('wordnet', quiet=True)
+    nltk.download('punkt', quiet=True)
 
-class TextResponse(BaseModel):
-    text: str
-    is_toxic: bool
-    toxic_score: float
-    details: Optional[Dict[str, Any]] = None
-
-class BatchTextRequest(BaseModel):
-    texts: List[str]
-    threshold: Optional[float] = 0.5
-    return_details: Optional[bool] = False
-
-class BatchTextResponse(BaseModel):
-    results: List[TextResponse]
-    summary: Dict[str, Any]
-
-# Global model variable
-toxicity_model = None
-
-def load_model(model_path='toxicity_model.pkl'):
-    """Load the pickled model without requiring original class"""
+# Load the trained model
+@app.on_event("startup")
+def load_model():
+    global model
+    model_path = os.environ.get("MODEL_PATH", "aurathreads_toxicity_detector.pkl")
     try:
-        print(f"Current directory: {os.getcwd()}")
-        print(f"Looking for model at: {model_path}")
-        
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found at {model_path}")
-        
-        # Load with protocol version that matches how it was saved
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
-        
-        # Verify the loaded object has the methods we need
-        required_methods = ['predict_proba', 'predict', 'detect_toxic_phrases', 'count_toxic_phrases']
-        for method in required_methods:
-            if not hasattr(model, method):
-                raise AttributeError(f"Loaded model missing required method: {method}")
-        
-        print("Model loaded successfully")
-        return model
     except Exception as e:
-        print(f"Error loading model: {str(e)}")
-        raise e
+        print(f"Error loading model: {e}")
+        model = None
 
-@app.on_event("startup")
-async def startup_event():
-    """Load model on startup"""
-    global toxicity_model
-    try:
-        toxicity_model = load_model()
-    except Exception as e:
-        print(f"Failed to load model: {str(e)}")
-        # In production, you might want to exit if model loading fails
-        raise
+# Text preprocessing functions
+def clean_text(text):
+    """Clean the text"""
+    if not isinstance(text, str):
+        return ""
+    
+    # Convert to lowercase
+    text = text.lower()
+    
+    # Remove URLs
+    text = re.sub(r'https?://\S+|www\.\S+', '', text)
+    
+    # Remove mentions and hashtags
+    text = re.sub(r'@\S+', '', text)
+    text = re.sub(r'#\S+', '', text)
+    
+    # Remove emojis and special characters
+    text = re.sub(r'[^\x00-\x7F]+', '', text)
+    
+    # Keep alphanumeric and basic punctuation
+    text = re.sub(r'[^a-zA-Z0-9\s.,!?]', '', text)
+    
+    # Remove extra whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    return text
 
-# API endpoints (same as before)
-@app.get("/")
-async def read_root():
+def process_text(text):
+    """Process text for model input"""
+    text = clean_text(text)
+    
+    # Tokenize
+    tokens = word_tokenize(text)
+    
+    # Remove stopwords
+    stop_words = set(stopwords.words('english'))
+    tokens = [t for t in tokens if t not in stop_words]
+    
+    # Lemmatize
+    lemmatizer = WordNetLemmatizer()
+    tokens = [lemmatizer.lemmatize(t) for t in tokens]
+    
+    # Join back to string
+    return " ".join(tokens)
+
+def predict_toxicity(text, threshold=0.5):
+    """Predict if text is toxic using the loaded model"""
+    if not model:
+        return {"error": "Model not loaded"}, 500
+    
+    processed_text = process_text(text)
+    
+    # Get prediction
+    if hasattr(model, 'predict_proba'):
+        proba = model.predict_proba([processed_text])
+        is_toxic = proba[0][1] > threshold
+        toxic_probability = float(proba[0][1])
+    else:
+        # For models without predict_proba (like LinearSVC)
+        decision = model.decision_function([processed_text])
+        toxic_probability = float(1 / (1 + np.exp(-decision[0])))
+        is_toxic = toxic_probability > threshold
+    
     return {
-        "message": "Toxicity Detection API is running",
-        "version": "1.0.0",
-        "endpoints": {
-            "/api/detect": "POST - Detect toxicity in a single text",
-            "/api/batch-detect": "POST - Detect toxicity in multiple texts",
-            "/health": "GET - Check health status"
-        }
+        "is_toxic": bool(is_toxic),
+        "toxic_probability": toxic_probability
     }
 
-@app.get("/health")
-async def health_check():
-    if toxicity_model is None:
-        return {"status": "unhealthy", "message": "Model not loaded"}
-    return {"status": "healthy", "message": "API is running and model is loaded"}
+# API endpoints
+@app.get("/")
+def read_root():
+    return {"message": "Toxicity Detection API is running"}
 
-@app.post("/api/detect", response_model=TextResponse)
-async def detect_toxicity(request: TextRequest):
-    if toxicity_model is None:
-        raise HTTPException(status_code=500, detail="Model not loaded")
-    
+@app.post("/predict")
+async def predict(request: Request):
     try:
-        proba = toxicity_model.predict_proba([request.text])[0][1]
-        is_toxic = proba > request.threshold
+        data = await request.json()
+        text = data.get("text", "")
         
-        response = {
-            "text": request.text,
-            "is_toxic": bool(is_toxic),
-            "toxic_score": float(proba),
-        }
+        if not text:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Text field is required"}
+            )
         
-        if request.return_details:
-            # These methods will work if they exist in the loaded model
-            toxic_phrases = toxicity_model.detect_toxic_phrases(request.text)
-            category_counts = toxicity_model.count_toxic_phrases(request.text)
-            
-            response["details"] = {
-                "toxic_phrases": [{"phrase": phrase, "category": category} 
-                                for phrase, category in toxic_phrases],
-                "category_counts": category_counts
-            }
-        
-        return response
+        result = predict_toxicity(text)
+        return result
+    
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Error processing request: {str(e)}"}
+        )
 
-@app.post("/api/batch-detect", response_model=BatchTextResponse)
-async def batch_detect_toxicity(request: BatchTextRequest):
-    if toxicity_model is None:
-        raise HTTPException(status_code=500, detail="Model not loaded")
-    
-    try:
-        probas = toxicity_model.predict_proba(request.texts)[:, 1]
-        is_toxic = probas > request.threshold
-        
-        results = []
-        for text, prob, toxic in zip(request.texts, probas, is_toxic):
-            result = {
-                "text": text,
-                "is_toxic": bool(toxic),
-                "toxic_score": float(prob),
-            }
-            
-            if request.return_details:
-                toxic_phrases = toxicity_model.detect_toxic_phrases(text)
-                category_counts = toxicity_model.count_toxic_phrases(text)
-                
-                result["details"] = {
-                    "toxic_phrases": [{"phrase": phrase, "category": category} 
-                                    for phrase, category in toxic_phrases],
-                    "category_counts": category_counts
-                }
-            
-            results.append(result)
-        
-        summary = {
-            "total_texts": len(request.texts),
-            "toxic_texts": int(sum(is_toxic)),
-            "non_toxic_texts": int(sum(~is_toxic)),
-            "average_toxic_score": float(np.mean(probas)),
-        }
-        
-        return {"results": results, "summary": summary}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
+# For local testing
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)
